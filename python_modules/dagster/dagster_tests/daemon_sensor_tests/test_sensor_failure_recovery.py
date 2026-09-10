@@ -1,11 +1,18 @@
+import logging
 import multiprocessing
+import warnings
 from unittest.mock import patch
 
 import dagster as dg
 import pytest
 from dagster._core.definitions.run_request import InstigatorType
 from dagster._core.instance import DagsterInstance
-from dagster._core.scheduler.instigation import InstigatorState, InstigatorStatus, TickStatus
+from dagster._core.scheduler.instigation import (
+    InstigatorState,
+    InstigatorStatus,
+    TickData,
+    TickStatus,
+)
 from dagster._core.storage.dagster_run import DagsterRunStatus
 from dagster._core.storage.tags import RUN_KEY_TAG, SENSOR_NAME_TAG
 from dagster._core.test_utils import (
@@ -17,7 +24,7 @@ from dagster._core.test_utils import (
     wait_for_futures,
 )
 from dagster._daemon import get_default_daemon_logger
-from dagster._daemon.sensor import execute_sensor_iteration
+from dagster._daemon.sensor import _get_evaluation_tick, execute_sensor_iteration
 from dagster._time import create_datetime, get_timezone
 from dagster._vendored.dateutil.relativedelta import relativedelta
 from dagster_shared.seven import IS_WINDOWS
@@ -54,6 +61,39 @@ def _test_launch_sensor_runs_in_subprocess(instance_ref, execution_datetime, deb
                     wait_for_futures(futures)
         finally:
             cleanup_test_instance(instance)
+
+
+def test_dangling_started_tick_cleanup_is_safe_when_warnings_are_errors(instance, remote_repo):
+    sensor = remote_repo.get_sensor("simple_sensor")
+    dangling_tick = instance.create_tick(
+        TickData(
+            instigator_origin_id=sensor.get_remote_origin_id(),
+            instigator_name=sensor.name,
+            instigator_type=InstigatorType.SENSOR,
+            status=TickStatus.STARTED,
+            timestamp=0.0,
+            selector_id=sensor.selector_id,
+            run_ids=[],
+        )
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        fresh_tick = _get_evaluation_tick(
+            instance,
+            sensor,
+            None,
+            1.0,
+            logging.getLogger(__name__),
+        )
+
+    assert fresh_tick.status == TickStatus.STARTED
+    updated_tick = next(
+        tick
+        for tick in instance.get_ticks(sensor.get_remote_origin_id(), sensor.selector_id)
+        if tick.tick_id == dangling_tick.tick_id
+    )
+    assert updated_tick.status == TickStatus.SKIPPED
 
 
 @pytest.mark.skipif(

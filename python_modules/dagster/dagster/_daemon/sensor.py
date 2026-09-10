@@ -542,7 +542,7 @@ def _get_evaluation_tick(
                 evaluation_timestamp - most_recent_tick.timestamp <= MAX_TIME_TO_RESUME_TICK_SECONDS
                 and has_unrequested_runs
             ):
-                logger.warn(
+                logger.warning(
                     f"Tick {most_recent_tick.tick_id} was interrupted part-way through, resuming"
                 )
                 return most_recent_tick
@@ -550,7 +550,9 @@ def _get_evaluation_tick(
             else:
                 # previous tick won't be resumed - move it into a SKIPPED state so it isn't left
                 # dangling in STARTED, but don't return it
-                logger.warn(f"Moving dangling STARTED tick {most_recent_tick.tick_id} into SKIPPED")
+                logger.warning(
+                    f"Moving dangling STARTED tick {most_recent_tick.tick_id} into SKIPPED"
+                )
                 most_recent_tick = most_recent_tick.with_status(status=TickStatus.SKIPPED)
                 instance.update_tick(most_recent_tick)
         elif (
