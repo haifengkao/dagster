@@ -68,13 +68,12 @@ class EventLogConsumerDaemon(IntervalDaemon):
                 if overall_max_event_id is None:
                     overall_max_event_id = instance.event_log_storage.get_maximum_record_id() or 0
                 cursor = overall_max_event_id
-                if overall_max_event_id == 0 and all(
-                    value is None for value in persisted_cursors.values()
-                ):
-                    # An empty instance has no history to skip. Missing only some cursors, or
-                    # starting with existing events, still merits a warning below.
+                if all(value is None for value in persisted_cursors.values()):
+                    # First activation can follow existing runs. Starting at the current
+                    # event-log position is intentional, not an incomplete cursor state.
                     self._logger.info(
-                        f"Initializing cursor for event type {event_type} at 0 (empty event log)"
+                        f"Initializing cursor for event type {event_type} at {cursor}; "
+                        "existing events will not be replayed"
                     )
                 else:
                     self._logger.warning(

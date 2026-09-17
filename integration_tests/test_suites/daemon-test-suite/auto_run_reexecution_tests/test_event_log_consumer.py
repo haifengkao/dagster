@@ -112,7 +112,9 @@ def test_cursors(instance: DagsterInstance, empty_workspace_context, caplog):
 
     assert len(caplog.records) == 2
     assert all(record.levelno == logging.INFO for record in caplog.records)
-    assert all("empty event log" in record.message for record in caplog.records)
+    assert all(
+        "at 0; existing events will not be replayed" in record.message for record in caplog.records
+    )
 
     assert instance.run_storage.get_cursor_values({FAILURE_KEY, SUCCESS_KEY}) == {
         FAILURE_KEY: str(0),
@@ -157,27 +159,49 @@ def test_cursors(instance: DagsterInstance, empty_workspace_context, caplog):
     assert len(daemon.run_records) == 2
 
 
-def test_cursor_init(instance: DagsterInstance, empty_workspace_context, caplog):
+@pytest.mark.parametrize("event_type", [DagsterEventType.RUN_FAILURE, DagsterEventType.RUN_SUCCESS])
+def test_cursor_init(instance: DagsterInstance, empty_workspace_context, caplog, event_type):
     instance.run_storage.wipe()
     daemon = MockEventLogConsumerDaemon()
 
     run1 = create_run_for_test(instance, "foo")
     run2 = create_run_for_test(instance, "foo")
 
-    instance.report_run_failed(run1)
-    instance.report_run_failed(run2)
+    for run in [run1, run2]:
+        if event_type == DagsterEventType.RUN_FAILURE:
+            instance.report_run_failed(run)
+        else:
+            _create_success_event(instance, run)
+    latest_event_id = instance.event_log_storage.get_maximum_record_id()
 
-    list(daemon.run_iteration(empty_workspace_context))
+    with caplog.at_level(logging.INFO):
+        list(daemon.run_iteration(empty_workspace_context))
     assert len(daemon.run_records) == 0, "Cursors init to latest event"
     assert len(caplog.records) == 2
-    assert all(record.levelno == logging.WARNING for record in caplog.records)
-    assert all("ignoring older events" in record.message for record in caplog.records)
+    assert all(record.levelno == logging.INFO for record in caplog.records)
+    assert all(
+        f"at {latest_event_id}; existing events will not be replayed" in record.message
+        for record in caplog.records
+    )
+    assert instance.daemon_cursor_storage.get_cursor_values({FAILURE_KEY, SUCCESS_KEY}) == {
+        FAILURE_KEY: str(latest_event_id),
+        SUCCESS_KEY: str(latest_event_id),
+    }
+    caplog.clear()
+    daemon = MockEventLogConsumerDaemon()
+    with caplog.at_level(logging.INFO):
+        list(daemon.run_iteration(empty_workspace_context))
+    assert caplog.records == []
+    assert daemon.run_records == []
 
     run3 = create_run_for_test(instance, "foo")
     instance.report_run_failed(run3)
 
     list(daemon.run_iteration(empty_workspace_context))
-    assert len(daemon.run_records) == 1
+    assert [record.dagster_run.run_id for record in daemon.run_records] == [run3.run_id]
+    daemon.run_records = []
+    list(daemon.run_iteration(empty_workspace_context))
+    assert daemon.run_records == []
 
 
 @pytest.mark.parametrize("persisted_key", [FAILURE_KEY, SUCCESS_KEY])
