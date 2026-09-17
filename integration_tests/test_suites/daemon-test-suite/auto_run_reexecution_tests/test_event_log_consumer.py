@@ -1,6 +1,7 @@
 import logging
 import time
 
+import pytest
 from dagster import DagsterEvent, DagsterEventType, EventLogEntry
 from dagster._core.instance import DagsterInstance
 from dagster._core.test_utils import create_run_for_test
@@ -102,16 +103,26 @@ FAILURE_KEY = "EVENT_LOG_CONSUMER_CURSOR-PIPELINE_FAILURE"
 SUCCESS_KEY = "EVENT_LOG_CONSUMER_CURSOR-PIPELINE_SUCCESS"
 
 
-def test_cursors(instance: DagsterInstance, empty_workspace_context):
+def test_cursors(instance: DagsterInstance, empty_workspace_context, caplog):
     assert instance.run_storage.get_cursor_values({FAILURE_KEY, SUCCESS_KEY}) == {}
 
     daemon = MockEventLogConsumerDaemon()
-    list(daemon.run_iteration(empty_workspace_context))
+    with caplog.at_level(logging.INFO):
+        list(daemon.run_iteration(empty_workspace_context))
+
+    assert len(caplog.records) == 2
+    assert all(record.levelno == logging.INFO for record in caplog.records)
+    assert all("empty event log" in record.message for record in caplog.records)
 
     assert instance.run_storage.get_cursor_values({FAILURE_KEY, SUCCESS_KEY}) == {
         FAILURE_KEY: str(0),
         SUCCESS_KEY: str(0),
     }
+    caplog.clear()
+    daemon = MockEventLogConsumerDaemon()
+    with caplog.at_level(logging.INFO):
+        list(daemon.run_iteration(empty_workspace_context))
+    assert caplog.records == [], "A restarted daemon reuses its persisted cursors"
 
     run1 = create_run_for_test(instance, "foo")
     run2 = create_run_for_test(instance, "foo")
@@ -146,7 +157,7 @@ def test_cursors(instance: DagsterInstance, empty_workspace_context):
     assert len(daemon.run_records) == 2
 
 
-def test_cursor_init(instance: DagsterInstance, empty_workspace_context):
+def test_cursor_init(instance: DagsterInstance, empty_workspace_context, caplog):
     instance.run_storage.wipe()
     daemon = MockEventLogConsumerDaemon()
 
@@ -158,12 +169,46 @@ def test_cursor_init(instance: DagsterInstance, empty_workspace_context):
 
     list(daemon.run_iteration(empty_workspace_context))
     assert len(daemon.run_records) == 0, "Cursors init to latest event"
+    assert len(caplog.records) == 2
+    assert all(record.levelno == logging.WARNING for record in caplog.records)
+    assert all("ignoring older events" in record.message for record in caplog.records)
 
     run3 = create_run_for_test(instance, "foo")
     instance.report_run_failed(run3)
 
     list(daemon.run_iteration(empty_workspace_context))
     assert len(daemon.run_records) == 1
+
+
+@pytest.mark.parametrize("persisted_key", [FAILURE_KEY, SUCCESS_KEY])
+def test_partial_cursor_initialization_warns(
+    instance: DagsterInstance, empty_workspace_context, caplog, persisted_key
+):
+    instance.daemon_cursor_storage.set_cursor_values({persisted_key: "0"})
+    daemon = MockEventLogConsumerDaemon()
+
+    list(daemon.run_iteration(empty_workspace_context))
+
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.WARNING
+    assert "ignoring older events" in caplog.records[0].message
+
+
+@pytest.mark.parametrize("invalid_key", [FAILURE_KEY, SUCCESS_KEY])
+def test_invalid_cursor_still_raises(
+    instance: DagsterInstance, empty_workspace_context, caplog, invalid_key
+):
+    cursors = {FAILURE_KEY: "0", SUCCESS_KEY: "0", invalid_key: "invalid"}
+    instance.daemon_cursor_storage.set_cursor_values(cursors)
+    daemon = MockEventLogConsumerDaemon()
+
+    with pytest.raises(ValueError, match="invalid"):
+        list(daemon.run_iteration(empty_workspace_context))
+
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.ERROR
+    assert "Invalid cursor" in caplog.records[0].message
+    assert instance.daemon_cursor_storage.get_cursor_values({FAILURE_KEY, SUCCESS_KEY}) == cursors
 
 
 def test_get_new_cursor():

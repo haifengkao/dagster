@@ -68,6 +68,18 @@ class EventLogConsumerDaemon(IntervalDaemon):
                 if overall_max_event_id is None:
                     overall_max_event_id = instance.event_log_storage.get_maximum_record_id() or 0
                 cursor = overall_max_event_id
+                if overall_max_event_id == 0 and all(
+                    value is None for value in persisted_cursors.values()
+                ):
+                    # An empty instance has no history to skip. Missing only some cursors, or
+                    # starting with existing events, still merits a warning below.
+                    self._logger.info(
+                        f"Initializing cursor for event type {event_type} at 0 (empty event log)"
+                    )
+                else:
+                    self._logger.warning(
+                        f"No cursor for event type {event_type}, ignoring older events"
+                    )
 
             events_by_log_id_for_type = instance.event_log_storage.get_logs_for_all_runs_by_log_id(
                 after_cursor=cursor,
@@ -124,7 +136,6 @@ def _fetch_persisted_cursors(
         raw_cursor_value = persisted_cursors.get(_create_cursor_key(event_type))
 
         if raw_cursor_value is None:
-            logger.warn(f"No cursor for event type {event_type}, ignoring older events")
             fetched_cursors[event_type] = None
         else:
             try:
